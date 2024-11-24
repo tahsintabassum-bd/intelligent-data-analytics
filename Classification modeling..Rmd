@@ -1,0 +1,1234 @@
+---
+title: "Group_10-HW7"
+author: "Tasbirul Alam Zihan"
+date: "2024-11-12"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+#Loading all required libraries
+
+```{r message=FALSE, warning=FALSE}
+library(pROC)
+library(mice)
+library(tidyverse)
+library(caret)
+library(AppliedPredictiveModeling)
+library(MASS)
+library(dplyr)
+library(car)
+library(corrr)
+library(car)
+library(Metrics)
+library(ggplot2)
+library(earth)
+library(rgl)
+library(mlbench)
+library(lubridate)
+library(qpcR)
+library(glmnet)
+library(e1071)
+library(randomForest)
+library(rpart)
+library(xgboost)
+library(Matrix)
+
+```
+
+
+
+#Loading the data
+
+```{r}
+
+train_1 <- read.csv(here::here('hm7-Train-2024.csv'))
+test_1 <- read.csv(here::here('hm7-Test-2024.csv'))
+
+```
+
+
+
+
+####################   Data-Preperation   #########################
+
+
+#Checking if any duplicates of patientID
+
+```{r}
+
+# Find duplicates in the patientID column
+duplicates <- train_1[duplicated(train_1$patientID), ]
+
+# Display duplicates
+print(duplicates)
+
+```
+
+
+#Replacing all blanks by NA
+
+```{r}
+
+train_1[train_1 == ""] <- NA
+
+```
+
+
+
+#Counting the NA percentage for all columns
+
+```{r}
+
+# Calculate the percentage of NA values in each column
+na_percentage <- sapply(train_1, function(x) sum(is.na(x)) / length(x) * 100)
+
+# Convert to a data frame for easy viewing
+na_percentage_df <- data.frame( NA_Percentage = na_percentage)
+
+
+na_percentage_df <- na_percentage_df%>%
+  arrange(desc(NA_Percentage))
+
+
+```
+
+
+
+#Removing columns with highest NA percetages
+
+```{r}
+
+train_2 <- subset(train_1, select = -c(indicator_2_level, medical_specialty, payer_code))
+
+```
+
+
+#Finding columns with only one unique value
+
+```{r}
+
+# Find columns with only one unique value
+one_value_columns <- names(train_2)[sapply(train_2, function(x) length(unique(x)) == 1)]
+
+one_value_columns
+
+```
+
+#Removing columns with only all/one unique value or having one value for almost all of the obs
+
+```{r}
+
+train_2 <- subset(train_2, select = -c(patientID, examide, citoglipton, glimepiride.pioglitazone,
+                                       max_glu_serum, glimepiride))
+
+```
+
+
+#Checking the variance of all the columns
+
+```{r}
+
+# Convert non-numeric columns to factors
+train_3 <- train_2 %>%
+  mutate_if(~ !is.numeric(.), as.factor)
+
+# Convert factor columns to integers (representing levels)
+train_4 <- train_3 %>%
+  mutate_if(is.factor, ~ as.integer(.))
+
+# Calculate variance for each column
+variance_df <- sapply(train_4, var, na.rm = TRUE)
+
+# Convert result to a data frame for readability
+variance_df <- data.frame(Column = names(variance_df), Variance = variance_df)
+
+variance_df <- variance_df%>%
+  arrange(Variance)
+
+```
+
+
+
+
+```{r}
+
+# Identify columns in train_3 with variance less than 10^-2
+low_variance_columns <- variance_df %>%
+  filter(Variance < 5 * 1e-2) %>%
+  pull(Column)
+
+# Remove these columns from train_3
+train_5 <- train_3[, !(names(train_3) %in% low_variance_columns)]
+
+colnames(train_5)
+
+```
+
+
+```{r}
+str(train_5$diagnosis)
+```
+
+
+#Checking NA values 
+
+```{r}
+
+# Identify columns with NA values
+na_columns <- sapply(train_5, function(x) sum(is.na(x)) > 0)
+
+# Extract names of columns with NA values
+columns_with_na <- names(train_5)[na_columns]
+
+# Get NA count for each of those columns
+na_count <- sapply(train_5[ , columns_with_na], function(x) sum(is.na(x)))
+
+# Combine the column names and NA counts into a data frame
+na_summary <- data.frame(Column = columns_with_na, NA_Count = na_count)
+
+# Display the result
+print(na_summary)
+
+
+```
+
+
+#Treating all NA, outlier values 
+
+```{r}
+
+train_6 <- train_5
+
+# Replace NA in the 'race' column with "Other"
+train_6$race[is.na(train_6$race)] <- "Other"
+
+# Replace NA in the 'gender' column with "Other"
+train_6$gender[is.na(train_6$gender)] <- "Unknown/Invalid"
+
+
+# Replace NA values in age column with the mode
+
+# Function to calculate the mode
+get_mode <- function(v) {
+  uniq_vals <- unique(v)
+  uniq_vals[which.max(tabulate(match(v, uniq_vals)))]
+}
+
+# Calculate the mode of the age column
+age_mode <- get_mode(train_6$age)
+
+# Replace NA values in age column with the mode
+train_6$age[is.na(train_6$age)] <- age_mode
+
+
+# Replace NA values in the 'time_in_hospital' column with the median
+train_6$time_in_hospital[is.na(train_6$time_in_hospital)] <- median(train_6$time_in_hospital, na.rm = TRUE)
+
+
+# Replace NA, outlier values in the 'indicator_level' column with the median
+# Calculate the median of the 'indicator_level' column, ignoring NA values
+indicator_median <- median(train_6$indicator_level, na.rm = TRUE)
+
+# Replace NA, values < 0, and values > 100 with the median
+train_6$indicator_level <- ifelse(
+  is.na(train_6$indicator_level) | train_6$indicator_level < 0 | train_6$indicator_level > 100,
+  indicator_median,
+  train_6$indicator_level
+)
+
+
+
+# Replace NA values in the 'time_in_hospital' column with the median
+train_6$num_lab_procedures[is.na(train_6$num_lab_procedures)] <- median(train_6$num_lab_procedures, na.rm = TRUE)
+
+
+
+
+# Convert the 'diagnosis' column to numeric, coercing non-numeric values to NA
+train_6$diagnosis <- as.numeric(as.character(train_6$diagnosis))
+
+# Calculate the median of 'diagnosis', ignoring NA values
+diagnosis_median <- median(train_6$diagnosis, na.rm = TRUE)
+
+# Replace NA values (originally NA or coerced from non-numeric) with the median
+train_6$diagnosis <- ifelse(
+  is.na(train_6$diagnosis),
+  diagnosis_median,
+  train_6$diagnosis
+)
+
+
+# Remove rows with NA in any other column
+#train_6 <- train_6 %>% drop_na()
+
+
+```
+
+
+#Export train_6
+
+```{r}
+
+write.csv(train_6, "train_6_zihan.csv", row.names = FALSE)
+
+```
+
+
+```{r}
+
+str(train_6)
+
+```
+
+
+
+#Coverting the train_6 columns into numeric and factor accordingly
+
+```{r}
+
+
+train_final <- train_6 %>%
+  mutate(across(where(~ !is.numeric(.)), as.factor))
+
+```
+
+
+```{r}
+str(train_final)
+```
+
+
+
+#Pre-processing test data
+
+```{r}
+
+count_duplicates <- test_1 %>%
+  group_by_all() %>%
+  filter(n()>1) %>%
+  ungroup()
+
+```
+
+
+```{r}
+
+test_1 <- test_1[1:(nrow(test_1) - 3), ]
+
+```
+
+
+
+```{r}
+
+test_2 <- test_1
+
+test_2[test_2 == ""] <- NA
+
+# Keep only the specified columns
+test_3 <- subset(test_2, select = c(race, gender, age, admission_type, discharge_disposition,
+         admission_source, time_in_hospital, indicator_level, num_lab_procedures,
+         num_procedures, num_medications, number_outpatient, number_emergency,
+         number_inpatient, diagnosis, number_diagnoses, A1Cresult, metformin,
+         glipizide, glyburide, pioglitazone, rosiglitazone, insulin,
+         diabetesMed))
+
+```
+
+
+
+```{r}
+
+test_4 <- test_3
+
+# Replace NA in the 'race' column with "Other"
+test_4$race[is.na(test_4$race)] <- "Other"
+
+# Replace NA in the 'gender' column with "Unknown/Invalid"
+test_4$gender[is.na(test_4$gender)] <- "Unknown/Invalid"
+
+# Replace NA values in age column with the mode
+
+# Function to calculate the mode
+get_mode <- function(v) {
+  uniq_vals <- unique(v)
+  uniq_vals[which.max(tabulate(match(v, uniq_vals)))]
+}
+
+# Calculate the mode of the age column
+age_mode <- get_mode(test_4$age)
+
+# Replace NA values in age column with the mode
+test_4$age[is.na(test_4$age)] <- age_mode
+
+# Replace NA values in the 'time_in_hospital' column with the median
+test_4$time_in_hospital[is.na(test_4$time_in_hospital)] <- median(test_4$time_in_hospital, na.rm = TRUE)
+
+# Replace NA, outlier values in the 'indicator_level' column with the median
+# Calculate the median of the 'indicator_level' column, ignoring NA values
+indicator_median <- median(test_4$indicator_level, na.rm = TRUE)
+
+# Replace NA, values < 0, and values > 100 with the median
+test_4$indicator_level <- ifelse(
+  is.na(test_4$indicator_level) | test_4$indicator_level < 0 | test_4$indicator_level > 100,
+  indicator_median,
+  test_4$indicator_level
+)
+
+
+
+# Replace NA values in the 'time_in_hospital' column with the median
+test_4$num_lab_procedures[is.na(test_4$num_lab_procedures)] <- median(test_4$num_lab_procedures, na.rm = TRUE)
+
+
+
+
+# Convert the 'diagnosis' column to numeric, coercing non-numeric values to NA
+test_4$diagnosis <- as.numeric(as.character(test_4$diagnosis))
+
+# Calculate the median of 'diagnosis', ignoring NA values
+diagnosis_median <- median(test_4$diagnosis, na.rm = TRUE)
+
+# Replace NA values (originally NA or coerced from non-numeric) with the median
+test_4$diagnosis <- ifelse(
+  is.na(test_4$diagnosis),
+  diagnosis_median,
+  test_4$diagnosis
+)
+
+
+
+```
+
+
+```{r}
+
+test_final <- test_4 %>%
+  mutate(across(where(~ !is.numeric(.)), as.factor))
+
+```
+
+
+
+```{r}
+str(test_final)
+```
+
+
+
+
+
+
+
+##################   Modelling    ##################################
+
+
+
+#Model 1: Logistic Regression
+
+```{r}
+
+
+# Define repeated cross-validation
+fitControl <- trainControl(
+  method = "repeatedcv", 
+  number = 10,             # Number of folds
+  repeats = 3,             # Number of repetitions
+  search = "grid",         # Use grid search
+  savePredictions = "final" # Save final predictions
+)
+
+# Define a grid for the alpha and lambda parameters
+b_grid <- expand.grid(
+  alpha = seq(0, 1, by = 0.1),          # Range of alpha values
+  lambda = seq(0.0001, 1, length = 10)  # Range of lambda values
+)
+
+
+
+```
+
+
+```{r}
+
+# Train the logistic regression model using glmnet and best resampling method
+fit_b <- train(
+  readmitted ~ ., 
+  data = train_final, 
+  method = "glmnet", 
+  trControl = fitControl,
+  tuneGrid = b_grid,
+  family = "binomial"  # Specify logistic regression
+)
+
+
+
+```
+
+
+
+```{r}
+
+print(fit_b$bestTune)
+
+
+```
+
+
+```{r}
+
+# Make predictions on the test data
+logregPrediction <- predict(fit_b, newdata = test_final)
+
+```
+
+```{r}
+
+# Prepare and save predictions
+logregpred <- data.frame(patientID = test_1$patientID, predReadmit = logregPrediction)
+write.csv(logregpred, "log1.sub.csv", row.names = FALSE)
+
+```
+
+
+
+
+#CV performance and hyperparameter value of Logistic Regression model
+
+```{r}
+
+train_final_x <- train_final
+
+# Convert predictions to binary values (0 or 1) based on a threshold of 0.5
+predictions <-  as.data.frame(predict(fit_b, train_final_x[,1:24])) 
+threshold <- 0.5
+predictions$binary_predictions <- ifelse(predictions[,1] >= threshold, 1, 0)
+
+# Convert binary_predictions to a factor with the same levels as Train_new$readmitted
+#binary_predictions <- factor(binary_predictions, levels = levels(train_final_x$readmitted))
+
+
+predictions$binary_predictions <- as.factor(predictions$binary_predictions)
+
+```
+
+```{r}
+
+train_final_x$readmitted <- as.factor(train_final_x$readmitted)
+
+# Confusion Matrix
+conf_matrix <- confusionMatrix(predictions$binary_predictions, train_final_x$readmitted)
+
+# Accuracy
+accuracy_lr <- conf_matrix$overall["Accuracy"]
+
+# Kappa
+kappa_lr <- conf_matrix$overall["Kappa"]
+
+# AUC Calculation
+auc_lr <- auc(train_final_x$readmitted, predictions$binary_predictions)
+
+precision_lr <- posPredValue(predictions$binary_predictions, train_final_x$readmitted)
+recall_lr <- sensitivity(predictions$binary_predictions, train_final_x$readmitted)
+f1_score_lr <- 2 * (precision * recall) / (precision + recall)
+f1_score_lr
+
+
+# Print the results
+cat("F1 Score:", f1_score_lr, "\n")
+
+cat("Accuracy:", accuracy_lr, "\n")
+cat("Kappa:", kappa_lr, "\n")
+cat("AUC:", auc_lr, "\n")
+
+```
+
+
+
+
+
+#Model 2 LASSO
+
+
+```{r}
+
+# Prepare the data
+train_final_numeric <- train_final %>%
+  mutate_if(is.factor, as.integer)  # Convert factors to integers if necessary
+
+# Separate predictors and response variable
+X <- train_final_numeric %>% dplyr::select(-readmitted)  # Assuming 'readmitted' is the response variable
+y <- train_final_numeric$readmitted
+
+# Convert data to matrix format for glmnet
+X_matrix <- as.matrix(X)
+y_vector <- as.numeric(y)
+
+# Perform Lasso logistic regression with cross-validation
+cv_lasso <- cv.glmnet(
+  x = X_matrix,
+  y = y_vector,
+  family = "binomial",  # Logistic regression
+  alpha = 1,            # Lasso penalty
+  nfolds = 10           # 10-fold cross-validation
+)
+
+# Extract the best lambda values
+best_lambda <- cv_lasso$lambda.min       # Lambda with minimum cross-validated error
+best_lambda_1se <- cv_lasso$lambda.1se   # Lambda within 1 standard error of the minimum
+
+# Plot to visualize lambda selection
+plot(cv_lasso)
+abline(v = log(best_lambda), col = "blue", lty = 2)
+abline(v = log(best_lambda_1se), col = "red", lty = 2)
+
+# Print best lambda values
+cat("Best lambda (min):", best_lambda, "\n")
+cat("Best lambda (1se):", best_lambda_1se, "\n")
+
+```
+
+
+```{r}
+
+# Assuming test_final has the same structure as train_final
+test_final_numeric <- test_final %>%
+  mutate_if(is.factor, as.integer)
+
+# Convert to matrix for prediction
+X_test_matrix <- as.matrix(test_final_numeric)
+
+# Predictions with best lambda
+lasso_predictions <- predict(cv_lasso, s = best_lambda, newx = X_test_matrix, type = "response")
+
+```
+
+
+```{r}
+
+patientID_test <- test_1$patientID
+patientID <- patientID_test
+lasso_pred <- data.frame(patientID, lasso_predictions)
+colnames(lasso_pred)[2] <- "predReadmit"
+
+```
+
+
+
+```{r}
+
+write.csv(lasso_pred, "lasso1.sub.csv", row.names = F)
+
+```
+
+
+
+#CV performance and hyperparameter value of LASSO model
+
+```{r}
+
+
+# Convert categorical variables to integers as required by glmnet
+train_final_numeric <- train_final %>%
+  mutate_if(is.factor, as.integer)
+
+# Separate predictors and response variable
+X <- train_final_numeric %>% dplyr::select(-readmitted)
+y <- as.numeric(train_final_numeric$readmitted)  # Ensure binary response
+
+# Convert data to matrix format for glmnet
+X_matrix <- as.matrix(X)
+
+# Assuming best_lambda is already determined
+best_lambda <- cv_lasso$lambda.min  # Replace this with your best lambda if defined elsewhere
+
+# Predict probabilities using the best lambda on the training set
+predicted_probs <- predict(cv_lasso, newx = X_matrix, s = best_lambda, type = "response")
+
+# Convert probabilities to binary classes (threshold = 0.5)
+predicted_classes <- ifelse(predicted_probs >= 0.5, 1, 0)
+
+# Calculate accuracy and kappa using the caret package
+actual_classes <- factor(y, levels = c(0, 1))
+predicted_classes <- factor(predicted_classes, levels = c(0, 1))
+
+# Confusion matrix to calculate accuracy and kappa
+conf_matrix <- confusionMatrix(predicted_classes, actual_classes)
+
+# Output accuracy and kappa
+accuracy_lasso <- conf_matrix$overall['Accuracy']
+kappa_lasso <- conf_matrix$overall['Kappa']
+
+cat("Lambda LASSO:", best_lambda, "\n")
+cat("Accuracy LASSO:", accuracy_lasso, "\n")
+cat("Kappa LASSO:", kappa_lasso, "\n")
+
+
+```
+
+
+
+#Model 3: MARS
+
+```{r}
+
+train_final_x <- train_final
+
+
+# Ensure the response variable is a factor for binary classification
+train_final_x$readmitted <- as.factor(train_final$readmitted)
+
+# Define train control with cross-validation
+fitControl <- trainControl(method = "cv", number = 10)
+
+# Define grid of hyperparameters to tune
+mars_grid <- expand.grid(degree = 1, nprune = seq(2, 25, by = 2))
+
+# Train the MARS model with cross-validation
+mars_tuned <- train(
+  readmitted ~ ., 
+  data = train_final_x, 
+  method = "earth", 
+  tuneGrid = mars_grid, 
+  trControl = fitControl
+)
+
+# Summary of the best tuned model
+print(mars_tuned$bestTune)
+
+
+```
+
+
+```{r}
+
+# predict with the Train and Test data
+#mars_pred <- predict(mars_model, Train_new)
+mars_pred <- predict(mars_tuned, newdata = test_final, type = "prob")
+
+# store the predicted output with the respective custID
+submission_mars <- data.frame(patientID = test_1$patientID, predReadmit = mars_pred)
+
+
+```
+
+
+```{r}
+
+write.csv(lasso_pred, "MARS2.sub.csv", row.names = F)
+
+```
+
+
+#CV performance and hyperparameter value of MARS model
+
+```{r}
+
+train_final_x <- train_final
+
+# Convert predictions to binary values (0 or 1) based on a threshold of 0.5
+predictions <-  as.data.frame(predict(mars_tuned, train_final_x[,1:24])) 
+threshold <- 0.5
+predictions$binary_predictions <- as.numeric(predictions[,1])-1
+
+# Convert binary_predictions to a factor with the same levels as Train_new$readmitted
+#binary_predictions <- factor(binary_predictions, levels = levels(train_final_x$readmitted))
+
+
+predictions$binary_predictions <- as.factor(predictions$binary_predictions)
+
+```
+
+```{r}
+
+train_final_x$readmitted <- as.factor(train_final_x$readmitted)
+
+# Confusion Matrix
+conf_matrix <- confusionMatrix(predictions$binary_predictions, train_final_x$readmitted)
+
+# Accuracy
+accuracy_mars <- conf_matrix$overall["Accuracy"]
+
+# Kappa
+kappa_mars <- conf_matrix$overall["Kappa"]
+
+# AUC Calculation
+auc_mars <- auc(train_final_x$readmitted, predictions$binary_predictions)
+
+precision <- posPredValue(predictions$binary_predictions, train_final_x$readmitted)
+recall <- sensitivity(predictions$binary_predictions, train_final_x$readmitted)
+f1_score <- 2 * (precision * recall) / (precision + recall)
+f1_score
+
+
+# Print the results
+cat("F1 Score:", f1_score, "\n")
+
+cat("Accuracy MARS:", accuracy_mars, "\n")
+cat("Kappa MARS:", kappa_mars, "\n")
+cat("AUC MARS:", auc_mars, "\n")
+
+
+```
+
+```{r}
+
+# Display the best hyperparameters from the tuned MARS model
+
+print(mars_tuned$bestTune)
+
+
+```
+
+
+
+
+
+#Model 4: Random Forest
+
+```{r}
+
+train_final_rf <- train_final
+
+# Convert readmitted to a factor for classification
+train_final_rf$readmitted <- as.factor(train_final_rf$readmitted)
+
+# Convert readmitted to factor with valid levels
+train_final_rf$readmitted <- factor(train_final_rf$readmitted, levels = c(0, 1), labels = c("No", "Yes"))
+
+ntree_rf <- 500
+
+# Re-run the Random Forest with tuning
+rf_tuned <- train(
+  readmitted ~ ., 
+  data = train_final_rf, 
+  method = "rf", 
+  trControl = fitControl, 
+  tuneGrid = rf_grid, 
+  ntree = ntree_rf               # Keep number of trees fixed or tune if desired
+)
+
+# Get the best model parameters
+print(rf_tuned$bestTune)
+
+
+
+```
+
+
+```{r}
+
+# Make predictions with the tuned model on test_final
+rf_probabilities <- predict(rf_tuned, newdata = test_final, type = "prob")[, "Yes"]
+rf_predictions <- data.frame(patientID = patientID_test, predReadmit = rf_probabilities)
+
+
+```
+
+```{r}
+
+# Save predictions
+write.csv(rf_predictions, "RF.sub.csv", row.names = FALSE)
+
+```
+
+
+
+
+#CV performance and hyperparameter value of Random Forest model
+
+```{r}
+
+train_final_x <- train_final
+
+# Convert predictions to binary values (0 or 1) based on a threshold of 0.5
+predictions <-  as.data.frame(predict(rf_tuned, newdata = train_final_x[,1:24],
+                                      type = "prob")[, "Yes"])
+threshold <- 0.5
+predictions$binary_predictions <- ifelse(predictions[,1] >= threshold, 1, 0)
+
+# Convert binary_predictions to a factor with the same levels as Train_new$readmitted
+#binary_predictions <- factor(binary_predictions, levels = levels(train_final_x$readmitted))
+
+
+predictions$binary_predictions <- as.factor(predictions$binary_predictions)
+
+```
+
+
+
+```{r}
+
+train_final_x$readmitted <- as.factor(train_final_x$readmitted)
+
+# Confusion Matrix
+conf_matrix <- confusionMatrix(predictions$binary_predictions, train_final_x$readmitted)
+
+# Accuracy
+accuracy_rf <- conf_matrix$overall["Accuracy"]
+
+# Kappa
+kappa_rf <- conf_matrix$overall["Kappa"]
+
+# AUC Calculation
+auc_rf <- auc(train_final_x$readmitted, predictions$binary_predictions)
+
+precision <- posPredValue(predictions$binary_predictions, train_final_x$readmitted)
+recall <- sensitivity(predictions$binary_predictions, train_final_x$readmitted)
+f1_score <- 2 * (precision * recall) / (precision + recall)
+f1_score
+
+
+# Print the results
+cat("F1 Score:", f1_score, "\n")
+
+cat("Accuracy RF:", accuracy_rf, "\n")
+cat("Kappa RF:", kappa_rf, "\n")
+cat("AUC RF:", auc_rf, "\n")
+
+```
+
+```{r}
+
+# Display the best hyperparameters from the tuned Random Forest model
+print(rf_tuned$bestTune)
+ntree_rf
+
+```
+
+
+
+
+
+#Model 5: Decision Tree
+
+```{r}
+
+# Load necessary packages
+library(caret)
+library(rpart)
+
+# Define cross-validation settings
+fitControl <- trainControl(method = "cv", number = 10)  # 10-fold cross-validation
+
+# Define a grid for tuning hyperparameters (e.g., cp = complexity parameter)
+tree_grid <- expand.grid(cp = seq(0.001, 0.05, by = 0.005))
+
+# Train the Decision Tree model with cross-validation and hyperparameter tuning
+tree_tuned <- train(
+  readmitted ~ ., 
+  data = train_final_dt, 
+  method = "rpart", 
+  trControl = fitControl, 
+  tuneGrid = tree_grid
+)
+
+# View the best-tuned hyperparameters
+print(tree_tuned$bestTune)
+
+
+```
+
+```{r}
+
+# Predict probabilities on the test set
+# `type = "prob"` gives probability predictions
+tree_predictions <- predict(tree_tuned, newdata = test_final, type = "prob")
+
+
+
+
+```
+
+
+
+```{r}
+
+tree_predictions <- tree_predictions[, "1"]
+
+# Create a data frame with patientID and predicted probabilities
+patientID_test <- test_1$patientID  
+dt_predictions <- data.frame(patientID = patientID_test, predReadmit = tree_predictions)
+
+
+```
+
+
+
+```{r}
+
+write.csv(dt_predictions, "DT1.sub.csv", row.names = F)
+
+```
+
+
+#CV performance and hyperparameter value of Decision tree model
+
+```{r}
+
+train_final_x <- train_final
+
+# Convert predictions to binary values (0 or 1) based on a threshold of 0.5
+predictions <-  as.data.frame(predict(tree_tuned, newdata = train_final_x[,1:24],
+                                      type = "prob")) 
+threshold <- 0.5
+predictions$binary_predictions <- ifelse(predictions[,1] >= threshold, 1, 0)
+
+# Convert binary_predictions to a factor with the same levels as Train_new$readmitted
+#binary_predictions <- factor(binary_predictions, levels = levels(train_final_x$readmitted))
+
+
+predictions$binary_predictions <- as.factor(predictions$binary_predictions)
+
+```
+
+```{r}
+
+train_final_x$readmitted <- as.factor(train_final_x$readmitted)
+
+# Confusion Matrix
+conf_matrix <- confusionMatrix(predictions$binary_predictions, train_final_x$readmitted)
+
+# Accuracy
+accuracy_dt <- conf_matrix$overall["Accuracy"]
+
+# Kappa
+kappa_dt <- conf_matrix$overall["Kappa"]
+
+# AUC Calculation
+auc_dt <- auc(train_final_x$readmitted, predictions$binary_predictions)
+
+precision <- posPredValue(predictions$binary_predictions, train_final_x$readmitted)
+recall <- sensitivity(predictions$binary_predictions, train_final_x$readmitted)
+f1_score <- 2 * (precision * recall) / (precision + recall)
+f1_score
+
+
+# Print the results
+cat("F1 Score:", f1_score, "\n")
+
+cat("Accuracy DT:", accuracy_rf, "\n")
+cat("Kappa DT:", kappa_rf, "\n")
+cat("AUC DT:", auc_rf, "\n")
+
+```
+
+```{r}
+
+# Extract the best complexity parameter (cp) value from the tuned model
+best_cp <- tree_tuned$bestTune$cp
+
+# Print the best cp value
+cat("Best complexity parameter (cp):", best_cp, "\n")
+
+
+```
+
+
+
+
+#Model 6: XGBoost
+
+```{r}
+# Convert categorical columns to dummy variables
+train_final_numeric <- train_final %>%
+  mutate_if(is.factor, as.integer) # Convert factor to integer encoding
+
+# Separate features and target variable
+target <- train_final_numeric$readmitted
+features <- train_final_numeric %>% dplyr::select(-readmitted)
+
+# Convert to DMatrix for XGBoost
+dtrain <- xgb.DMatrix(data = as.matrix(features), label = target)
+
+
+```
+
+
+```{r}
+
+params <- list(
+  objective = "binary:logistic", # for binary classification
+  eval_metric = "logloss",       # log-loss error
+  max_depth = 6,                 # maximum depth of the tree
+  eta = 0.3,                     # learning rate
+  nthread = 4,                   # number of threads
+  gamma = 0,                     # minimum loss reduction
+  colsample_bytree = 0.8,        # subsample ratio of columns when constructing each tree
+  subsample = 0.8                # subsample ratio of the training instances
+)
+
+
+```
+
+
+
+```{r}
+
+# Perform cross-validation
+xgb_cv <- xgb.cv(
+  params = params,
+  data = dtrain,
+  nrounds = 100,                 # maximum number of boosting rounds
+  nfold = 5,                     # number of folds for cross-validation
+  showsd = TRUE,                 # display standard deviation
+  stratified = TRUE,             # stratified sampling for cross-validation
+  print_every_n = 10,            # print every 10 rounds
+  early_stopping_rounds = 10,    # stop if no improvement in 10 rounds
+  maximize = FALSE
+)
+
+# Determine the best iteration
+best_nrounds <- xgb_cv$best_iteration
+
+
+```
+
+
+```{r}
+
+# Train the model using the best number of rounds
+xgb_model <- xgboost(
+  params = params,
+  data = dtrain,
+  nrounds = best_nrounds,
+  verbose = 1
+)
+
+
+```
+
+
+```{r}
+
+# Convert categorical columns in test_final to integer encoding (same as train_final)
+test_final_numeric <- test_final %>%
+  mutate_if(is.factor, as.integer)
+
+# Convert test_final to DMatrix
+dtest <- xgb.DMatrix(data = as.matrix(test_final_numeric))
+
+# Predict probabilities for class '1' in the response variable
+predictions <- predict(xgb_model, newdata = dtest)
+
+```
+
+
+```{r}
+# Create a data frame with patientID and predicted probabilities
+patientID_test <- test_1$patientID  
+xgb_predictions <- data.frame(patientID = patientID_test, predReadmit = predictions)
+
+
+```
+
+
+
+```{r}
+
+write.csv(xgb_predictions, "XGboost1.sub.csv", row.names = F)
+
+```
+
+
+
+
+#CV performance and hyperparameter value of XGBoost model
+
+```{r}
+
+train_final_x <- train_final
+
+# Convert categorical columns in test_final to integer encoding (same as train_final)
+train_final_x <- train_final_x %>%
+  mutate_if(is.factor, as.integer)
+
+# Convert test_final to DMatrix
+dtest <- xgb.DMatrix(data = as.matrix(train_final_x[,1:24]))
+
+# Predict probabilities for class '1' in the response variable
+predictions <- as.data.frame(predict(xgb_model, newdata = dtest, type = "prob"))
+
+
+threshold <- 0.5
+predictions$binary_predictions <- ifelse(predictions[,1] >= threshold, 1, 0)
+
+# Convert binary_predictions to a factor with the same levels as Train_new$readmitted
+#binary_predictions <- factor(binary_predictions, levels = levels(train_final_x$readmitted))
+
+
+predictions$binary_predictions <- as.factor(predictions$binary_predictions)
+
+```
+
+```{r}
+
+train_final_x$readmitted <- as.factor(train_final_x$readmitted)
+
+# Confusion Matrix
+conf_matrix <- confusionMatrix(predictions$binary_predictions, train_final_x$readmitted)
+
+# Accuracy
+accuracy_xgb <- conf_matrix$overall["Accuracy"]
+
+# Kappa
+kappa_xgb <- conf_matrix$overall["Kappa"]
+
+# AUC Calculation
+auc_xgb <- auc(train_final_x$readmitted, predictions$binary_predictions)
+
+precision <- posPredValue(predictions$binary_predictions, train_final_x$readmitted)
+recall <- sensitivity(predictions$binary_predictions, train_final_x$readmitted)
+f1_score <- 2 * (precision * recall) / (precision + recall)
+f1_score
+
+
+# Print the results
+cat("F1 Score:", f1_score, "\n")
+
+cat("Accuracy XGB:", accuracy_xgb, "\n")
+cat("Kappa XGB:", kappa_xgb, "\n")
+cat("AUC XGB:", auc_xgb, "\n")
+
+```
+
+
+
+```{r}
+
+# Get the best number of rounds from cross-validation
+best_nrounds <- xgb_cv$best_iteration
+
+best_nrounds
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
