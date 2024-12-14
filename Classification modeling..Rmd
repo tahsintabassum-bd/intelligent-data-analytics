@@ -1,9 +1,5 @@
----
+
 title: "Group_10-HW7"
-author: "Tasbirul Alam Zihan"
-date: "2024-11-12"
-output: html_document
----
 
 
 ```{r setup, include=FALSE}
